@@ -1,0 +1,67 @@
+name: Deploy Admin Portal (Firebase Hosting — private)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-admin-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ⚠️ Set these to the dedicated ADMIN project (NOT the public one).
+  GCP_PROJECT: ib-admin-uat
+  FIREBASE_SITE: ib-admin-uat
+  # Shared backend lives in the public project — this app calls it cross-origin.
+  API_BASE_URL: https://asia-south1-ib-product-application-uat.cloudfunctions.net/ib-faq-handler
+
+jobs:
+  deploy:
+    name: Build & deploy (static)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build Next.js (static export)
+        env:
+          NEXT_PUBLIC_API_BASE: ${{ env.API_BASE_URL }}
+          # SSO activates only when this is set; app still works via password login without it.
+          NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          NODE_ENV: production
+        run: npm run build
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools@latest
+
+      - name: Deploy to Firebase Hosting (private admin site)
+        run: |
+          firebase deploy \
+            --only hosting:${{ env.FIREBASE_SITE }} \
+            --project ${{ env.GCP_PROJECT }} \
+            --non-interactive
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Admin Portal Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "| Site | https://${{ env.FIREBASE_SITE }}.web.app (noindex, private) |" >> $GITHUB_STEP_SUMMARY
