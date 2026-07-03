@@ -10,19 +10,23 @@ out of the public repo (`ib-product-support-portal`) so that:
 - it authenticates via the **shared backend** (`ib-faq-handler`) with SSO + password.
 
 ## Architecture
-- **Frontend:** this repo → deployed to its **own GCP/Firebase project** (`ib-admin-uat`).
+- **Frontend:** this repo → its own Firebase **Hosting site** (`ib-admin-uat`, a
+  separate origin, `noindex`) inside the shared UAT project
+  `ib-product-application-uat`. It can be moved to a dedicated GCP project later
+  by changing `GCP_PROJECT` in the workflow and swapping `GCP_SA_KEY`.
 - **Backend + data:** unchanged — the shared Cloud Function `ib-faq-handler` and
   Firestore stay in `ib-product-application-uat`. This app calls it via
-  `NEXT_PUBLIC_API_BASE`. (That function must allow this app's origin in CORS.)
+  `NEXT_PUBLIC_API_BASE` = `https://uat-support.indiabullssecurities.com/ib-faq-handler`
+  (the LB path; the bare `cloudfunctions.net` URL is not reachable from outside).
+  That function's `ALLOWED_ORIGINS` must include this app's origin (done in the
+  public repo's `gcp/.env.yaml`).
 
 ## Required configuration (set before deploy)
 | Where | Key | Value |
 |---|---|---|
-| `firebase.json` | `hosting.site` | your admin Hosting site (default: `ib-admin-uat`) |
-| CI / build env | `NEXT_PUBLIC_API_BASE` | `https://asia-south1-ib-product-application-uat.cloudfunctions.net/ib-faq-handler` |
-| CI / build env | `NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID` | the Google Workspace OAuth Web Client ID (enables SSO; app works without it via password) |
-| GitHub secret | `GCP_SA_KEY` | service-account key for the **admin** project |
-| GitHub secret | `GOOGLE_OAUTH_CLIENT_ID` | same client ID (consumed by the workflow) |
+| GitHub secret | `GCP_SA_KEY` | the **same** service-account key the public repo (`ib-product-support-portal`) uses — copy it into this repo's Actions secrets |
+| GitHub secret | `GOOGLE_OAUTH_CLIENT_ID` | Google Workspace OAuth Web Client ID (optional — enables SSO; password login works without it) |
+| `firebase.json` | `hosting.site` | admin Hosting site (default: `ib-admin-uat`; CI creates it if missing) |
 
 ## Local dev
 ```bash
