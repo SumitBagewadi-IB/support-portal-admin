@@ -58,6 +58,12 @@ interface Feedback {
   date?: string;
 }
 
+// Mirrors PUBLIC_FAQ_STATUSES on the API. Anything that is not an explicit draft
+// is live for customers — legacy rows have no status, or use 'active'/'approved'.
+// Counting only status === 'published' left those out of both stat cards and both
+// status filters, so Published + Drafts never summed to Total.
+const isLive = (status?: string) => !status || status === 'published' || status === 'active' || status === 'approved';
+
 const emptyForm = { title: '', category: '', content: '', status: 'published' };
 
 export default function AdminPage() {
@@ -112,6 +118,8 @@ export default function AdminPage() {
   const [catFormMsg, setCatFormMsg] = useState('');
   const [catSubmitting, setCatSubmitting] = useState(false);
   const [deletingCatId, setDeletingCatId] = useState<string | null>(null);
+  // Name of the category being turned into a record, or '__all__' for the batch.
+  const [adoptingCat, setAdoptingCat] = useState<string | null>(null);
 
   // Audit log
   const [auditLogs, setAuditLogs] = useState<{ id: string; timestamp: string; action: string; entity: string; entityId: string; entityTitle: string; performedBy: string; meta?: Record<string, string> }[]>([]);
@@ -353,7 +361,11 @@ export default function AdminPage() {
     setError('');
     if (API_BASE) {
       try {
-        const res = await fetch(`${API_BASE}/faq`);
+        // Authenticated on purpose: GET /faq returns ONLY published articles to
+        // anonymous callers, so an unauthenticated fetch here makes every draft
+        // invisible in the admin. Drafts then accumulate unseen — the portal
+        // reports Drafts: 0 while they sit in Firestore.
+        const res = await fetch(`${API_BASE}/faq`, managerToken ? { headers: authHeaders(managerToken) } : undefined);
         if (res.status === 401) { handleSessionExpired(); return; }
         if (res.ok) {
           const data = await res.json();
@@ -373,7 +385,7 @@ export default function AdminPage() {
     }
     setLoading(false);
     setLastRefreshed(new Date());
-  }, [handleSessionExpired]);
+  }, [handleSessionExpired, managerToken, authHeaders]);
 
   useEffect(() => { if (authed) fetchArticles(); }, [authed, fetchArticles]);
 
@@ -412,11 +424,19 @@ export default function AdminPage() {
       const toUpdate = reorderCategory
         ? articles.filter(a => a.category === reorderCategory)
         : articles;
+      // A category-scoped reorder reuses the sortOrder slots that category already
+      // occupies. Renumbering it 0..n collided with every other category's
+      // numbering and pulled the whole category to the top of the list — the
+      // reorder "worked" while the list came back scrambled.
+      const slots = reorderCategory
+        ? toUpdate.map((a, i) => (typeof a.sortOrder === 'number' ? a.sortOrder : i)).sort((x, y) => x - y)
+        : toUpdate.map((_, i) => i);
+      for (let i = 1; i < slots.length; i++) if (slots[i] <= slots[i - 1]) slots[i] = slots[i - 1] + 1;
       const results = await Promise.all(toUpdate.map((a, i) =>
         fetch(`${API_BASE}/faq/${a.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${managerToken}` },
-          body: JSON.stringify({ sortOrder: i }),
+          body: JSON.stringify({ sortOrder: slots[i] }),
         })
       ));
       const unauthorized = results.find(r => r.status === 401);
@@ -494,8 +514,44 @@ export default function AdminPage() {
     finally { setDeletingId(null); }
   };
 
+  // Create a real category record for a topic that exists only as text on
+  // articles. Icon, description, subcategories and ordering all hang off a
+  // record, so without one a topic cannot be managed at all — it does not even
+  // appear on the Categories screen.
+  const adoptCategory = async (name: string): Promise<boolean> => {
+    if (!managerToken) return false;
+    const idx = FALLBACK_CATEGORIES.findIndex(c => c.toLowerCase() === name.toLowerCase());
+    try {
+      const res = await fetch(`${API_BASE}/categories`, {
+        method: 'POST',
+        headers: authHeaders(managerToken),
+        body: JSON.stringify({ name, icon: 'fas fa-folder', parentId: null, description: '', sortOrder: idx >= 0 ? idx : 500 }),
+      });
+      if (res.status === 401) { handleSessionExpired(); return false; }
+      return res.ok;
+    } catch { return false; }
+  };
+
+  const adoptOneCategory = async (name: string) => {
+    setAdoptingCat(name);
+    const ok = await adoptCategory(name);
+    setAdoptingCat(null);
+    showToast(ok ? `"${name}" added — you can now set its icon and description.` : `Could not add "${name}".`);
+    if (ok) fetchCategories();
+  };
+
+  const adoptAllCategories = async (names: string[]) => {
+    if (names.length === 0) return;
+    setAdoptingCat('__all__');
+    let ok = 0;
+    for (const n of names) { if (await adoptCategory(n)) ok++; }
+    setAdoptingCat(null);
+    showToast(`${ok} categor${ok === 1 ? 'y' : 'ies'} added${ok < names.length ? `, ${names.length - ok} failed` : ''}.`);
+    fetchCategories();
+  };
+
   const handleToggleStatus = async (article: Article) => {
-    const isPublished = article.status === 'published' || article.status === 'active';
+    const isPublished = isLive(article.status);
     const newStatus = isPublished ? 'draft' : 'published';
     setTogglingId(article.id);
     // Optimistic update
@@ -563,7 +619,7 @@ export default function AdminPage() {
   const filtered = articles.filter((a) => {
     const matchSearch = !search || (a.title || a.question || '').toLowerCase().includes(search.toLowerCase()) || a.category?.toLowerCase().includes(search.toLowerCase());
     const matchCat = !catFilter || a.category === catFilter;
-    const matchStatus = !statusFilter || (statusFilter === 'published' ? (a.status === 'published' || a.status === 'active') : a.status === 'draft');
+    const matchStatus = !statusFilter || (statusFilter === 'published' ? isLive(a.status) : !isLive(a.status));
     return matchSearch && matchCat && matchStatus;
   }).sort((a, b) => {
     if (sortBy === 'title') return (a.title || '').localeCompare(b.title || '');
@@ -599,8 +655,15 @@ export default function AdminPage() {
     ? [...dynamicCategories.map(c => c.name), ...articleOnlyCategories]
     : FALLBACK_CATEGORIES;
 
-  const publishedCount = articles.filter((a) => a.status === 'published' || a.status === 'active').length;
-  const draftCount = articles.filter((a) => a.status === 'draft').length;
+  const publishedCount = articles.filter((a) => isLive(a.status)).length;
+  const draftCount = articles.filter((a) => !isLive(a.status)).length;
+  // Topics articles actually use that have no category record. These are absent
+  // from the Categories screen entirely, so most of the library can sit in
+  // categories nobody is able to edit.
+  const unmanagedCategories = articleOnlyCategories
+    .map((name) => ({ name, count: articles.filter((a) => a.category === name).length }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  const unmanagedArticleCount = unmanagedCategories.reduce((n, u) => n + u.count, 0);
   const openTickets = tickets.filter((t) => t.status !== 'solved' && t.status !== 'resolved').length;
 
   // ── LOGIN SCREEN ──────────────────────────────────────────────────────────
@@ -819,6 +882,20 @@ export default function AdminPage() {
           )}
 
           {/* ARTICLES VIEW */}
+          {activeView === 'articles' && !loading && draftCount > 0 && statusFilter !== 'draft' && (
+            /* Drafts are invisible to customers and, until the fix above, were
+               invisible here too. Make the state loud and give it one click. */
+            <div style={{ background: '#FFFBEB', border: '1.5px solid #FCD34D', borderRadius: 12, padding: '0.875rem 1.125rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <i className="fas fa-file-pen" style={{ color: '#D97706', fontSize: '1rem' }}></i>
+              <span style={{ fontSize: '0.875rem', color: '#78350F', fontWeight: 600, flex: 1, minWidth: 200 }}>
+                {draftCount.toLocaleString()} article{draftCount !== 1 ? 's' : ''} {draftCount !== 1 ? 'are' : 'is'} still a draft and {draftCount !== 1 ? 'are' : 'is'} not visible to customers.
+              </span>
+              <button onClick={() => { setStatusFilter('draft'); setCatFilter(''); setSearch(''); setPage(1); }} style={{ padding: '0.4rem 0.875rem', background: '#D97706', color: 'white', border: 'none', borderRadius: 8, fontSize: '0.8125rem', fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                Review {draftCount.toLocaleString()} draft{draftCount !== 1 ? 's' : ''}
+              </button>
+            </div>
+          )}
+
           {activeView === 'articles' && (
             <>
               {/* Filter bar */}
@@ -907,7 +984,7 @@ export default function AdminPage() {
                       </thead>
                       <tbody>
                         {paginated.map((article, i) => {
-                          const isPublished = article.status === 'published' || article.status === 'active';
+                          const isPublished = isLive(article.status);
                           const isToggling = togglingId === article.id;
                           const isDeleting = deletingId === article.id;
                           const lastAudit = auditLogs
@@ -952,7 +1029,12 @@ export default function AdminPage() {
                               <td style={{ padding: '0.875rem 1.25rem', width: 130 }}>
                                 <div style={{ display: 'flex', gap: '0.375rem', justifyContent: 'flex-end' }}>
                                   {sortBy === 'default' && !!catFilter && (() => {
-                                    const gi = (safePage - 1) * PAGE_SIZE + i;
+                                    // Index into `articles`, NOT into the filtered/paginated
+                                    // page. These buttons only render with a category filter
+                                    // active, so the visual row index pointed at a different
+                                    // article entirely and Move Up/Down silently no-op'd or
+                                    // swapped the wrong two rows.
+                                    const gi = articles.findIndex((a) => a.id === article.id);
                                     const cat = catFilter;
                                     const peers = articles.map((a, idx) => idx).filter((idx) => articles[idx].category === cat);
                                     const peerPos = peers.indexOf(gi);
@@ -1286,6 +1368,41 @@ export default function AdminPage() {
                           </button>
                         </div>
                       ))}
+
+                      {/* Topics articles use that have no category record. This screen
+                          listed only the categories collection, so a topic created by
+                          an import or by typing a new name on an article never appears
+                          here — no icon, no description, no subcategories, no ordering. */}
+                      {unmanagedCategories.length > 0 && (
+                        <div style={{ marginTop: '0.5rem', border: '1.5px solid #FCD34D', background: '#FFFBEB', borderRadius: 10, overflow: 'hidden' }}>
+                          <div style={{ padding: '0.875rem 1rem', display: 'flex', alignItems: 'flex-start', gap: '0.625rem', flexWrap: 'wrap' }}>
+                            <i className="fas fa-triangle-exclamation" style={{ color: '#D97706', fontSize: '0.875rem', marginTop: '0.15rem' }}></i>
+                            <div style={{ flex: 1, minWidth: 240 }}>
+                              <div style={{ fontWeight: 700, fontSize: '0.875rem', color: '#78350F', marginBottom: '0.2rem' }}>
+                                {unmanagedCategories.length} categor{unmanagedCategories.length === 1 ? 'y is' : 'ies are'} used by articles but not set up here
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: '#92400E', lineHeight: 1.5 }}>
+                                {unmanagedArticleCount.toLocaleString()} article{unmanagedArticleCount === 1 ? '' : 's'} sit in {unmanagedCategories.length === 1 ? 'it' : 'them'}. Customers can browse {unmanagedCategories.length === 1 ? 'it' : 'them'} on the Knowledge Base, but until a category record exists you cannot give {unmanagedCategories.length === 1 ? 'it' : 'them'} an icon, a description, subcategories or an order.
+                              </div>
+                            </div>
+                            <button onClick={() => adoptAllCategories(unmanagedCategories.map(u => u.name))} disabled={!!adoptingCat} style={{ padding: '0.4rem 0.875rem', borderRadius: 8, border: 'none', background: '#D97706', color: 'white', fontSize: '0.8125rem', fontWeight: 700, cursor: adoptingCat ? 'wait' : 'pointer', opacity: adoptingCat ? 0.7 : 1, whiteSpace: 'nowrap' }}>
+                              {adoptingCat === '__all__' ? <><i className="fas fa-spinner fa-spin" style={{ fontSize: '0.7rem' }}></i> Adding…</> : `Add all ${unmanagedCategories.length}`}
+                            </button>
+                          </div>
+                          <div style={{ borderTop: '1px solid #FCD34D' }}>
+                            {unmanagedCategories.map((u, idx) => (
+                              <div key={u.name} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem 1rem', borderBottom: idx < unmanagedCategories.length - 1 ? '1px solid #FDE68A' : 'none' }}>
+                                <i className="fas fa-folder" style={{ color: '#D97706', fontSize: '0.75rem', flexShrink: 0 }}></i>
+                                <span style={{ flex: 1, fontSize: '0.875rem', color: '#78350F', fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.name}</span>
+                                <span style={{ fontSize: '0.75rem', color: '#92400E', flexShrink: 0 }}>{u.count.toLocaleString()} article{u.count === 1 ? '' : 's'}</span>
+                                <button onClick={() => adoptOneCategory(u.name)} disabled={!!adoptingCat} style={{ height: 26, padding: '0 0.625rem', borderRadius: 6, border: '1.5px solid #D97706', background: 'var(--admin-surface)', color: '#B45309', fontSize: '0.7rem', fontWeight: 700, cursor: adoptingCat ? 'wait' : 'pointer', flexShrink: 0 }}>
+                                  {adoptingCat === u.name ? <i className="fas fa-spinner fa-spin" style={{ fontSize: '0.6rem' }}></i> : 'Add'}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
