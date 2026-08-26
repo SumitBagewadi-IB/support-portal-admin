@@ -424,11 +424,19 @@ export default function AdminPage() {
       const toUpdate = reorderCategory
         ? articles.filter(a => a.category === reorderCategory)
         : articles;
+      // A category-scoped reorder reuses the sortOrder slots that category already
+      // occupies. Renumbering it 0..n collided with every other category's
+      // numbering and pulled the whole category to the top of the list — the
+      // reorder "worked" while the list came back scrambled.
+      const slots = reorderCategory
+        ? toUpdate.map((a, i) => (typeof a.sortOrder === 'number' ? a.sortOrder : i)).sort((x, y) => x - y)
+        : toUpdate.map((_, i) => i);
+      for (let i = 1; i < slots.length; i++) if (slots[i] <= slots[i - 1]) slots[i] = slots[i - 1] + 1;
       const results = await Promise.all(toUpdate.map((a, i) =>
         fetch(`${API_BASE}/faq/${a.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${managerToken}` },
-          body: JSON.stringify({ sortOrder: i }),
+          body: JSON.stringify({ sortOrder: slots[i] }),
         })
       ));
       const unauthorized = results.find(r => r.status === 401);
@@ -1021,7 +1029,12 @@ export default function AdminPage() {
                               <td style={{ padding: '0.875rem 1.25rem', width: 130 }}>
                                 <div style={{ display: 'flex', gap: '0.375rem', justifyContent: 'flex-end' }}>
                                   {sortBy === 'default' && !!catFilter && (() => {
-                                    const gi = (safePage - 1) * PAGE_SIZE + i;
+                                    // Index into `articles`, NOT into the filtered/paginated
+                                    // page. These buttons only render with a category filter
+                                    // active, so the visual row index pointed at a different
+                                    // article entirely and Move Up/Down silently no-op'd or
+                                    // swapped the wrong two rows.
+                                    const gi = articles.findIndex((a) => a.id === article.id);
                                     const cat = catFilter;
                                     const peers = articles.map((a, idx) => idx).filter((idx) => articles[idx].category === cat);
                                     const peerPos = peers.indexOf(gi);
