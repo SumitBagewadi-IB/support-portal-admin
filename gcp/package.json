@@ -1,0 +1,12 @@
+{
+  "name": "ib-faq-handler-admin",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.5"
+  }
+}
