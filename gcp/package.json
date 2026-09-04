@@ -2,7 +2,8 @@
   "name": "ib-faq-handler-admin",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
+  "type": "module",
+  "main": "index.mjs",
   "engines": {
     "node": "22"
   },
