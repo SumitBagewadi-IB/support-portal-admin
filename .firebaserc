@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "default": "ibproduct-vibe-coding"
+  },
+  "targets": {
+    "ibproduct-vibe-coding": {
+      "hosting": {
+        "admin-prod": ["ib-admin"],
+        "admin-uat": ["ib-admin-uat"]
+      }
+    }
+  }
+}
