@@ -1,0 +1,116 @@
+steps:
+  # =================================================
+  # Setup Node.js / Install dependencies
+  # =================================================
+  - name: 'node:22'
+    id: 'Install dependencies'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        npm ci
+
+  # =================================================
+  # Build Frontend
+  # =================================================
+  - name: 'node:22'
+    id: 'Build frontend'
+    entrypoint: 'bash'
+    env:
+      - 'NODE_ENV=production'
+      - 'NEXT_PUBLIC_API_BASE=${_API_BASE_URL}'
+      - 'NEXT_PUBLIC_FRONTEND_URL=${_FRONTEND_URL}'
+      - 'NEXT_PUBLIC_MASTER_ADMIN_URL=${_MASTER_ADMIN_URL}'
+      # Google Workspace SSO. Baked into the bundle at build time; without it
+      # the sign-in button never renders and only password login works.
+      - 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=${_GOOGLE_CLIENT_ID}'
+    args:
+      - '-c'
+      - |
+        npm run build
+
+  # =================================================
+  # Upload Frontend to Cloud Storage
+  # =================================================
+  - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli'
+    id: 'Upload frontend'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gsutil -m rsync -r -d out gs://${_FRONTEND_BUCKET}
+
+  # =================================================
+  # Deploy Cloud Function Gen2
+  # =================================================
+  - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli'
+    id: 'Deploy Cloud Function'
+    entrypoint: 'bash'
+    dir: 'gcp'
+    args:
+      - '-c'
+      - |
+        gcloud functions deploy ${_CLOUD_FUNCTION_NAME} \
+          --gen2 \
+          --runtime=nodejs22 \
+          --region=${_GCP_REGION} \
+          --source=. \
+          --entry-point=handler \
+          --trigger-http \
+          --allow-unauthenticated \
+          --memory=512Mi \
+          --timeout=60s \
+          --max-instances=10 \
+          --env-vars-file=.env-gcp-uat.yaml \
+          --set-secrets=JWT_SECRET=JWT_SECRET:latest,ADMIN_SECRET=ADMIN_SECRET:latest,MASTER_ADMIN_SECRET=MASTER_ADMIN_SECRET:latest \
+          --project=${_GCP_PROJECT}
+
+# =================================================
+# Cloud Build Configuration
+# =================================================
+
+substitutions:
+  _GCP_PROJECT: 'ib-product-application-uat'
+  _GCP_REGION: 'asia-south1'
+
+  # =================================================
+  # Cloud Function
+  # =================================================
+  _CLOUD_FUNCTION_NAME: 'ib-faq-handler-admin'
+
+  # =================================================
+  # Frontend
+  # Same bucket for Admin and Master Admin
+  # =================================================
+  _FRONTEND_BUCKET: 'ib-product-application-admin-uat'
+
+  # Admin URL
+  _FRONTEND_URL: 'https://uat-support-admin.indiabullssecurities.com/admin/'
+
+  # Master Admin URL
+  _MASTER_ADMIN_URL: 'https://uat-support-masteradmin.indiabullssecurities.com/masteradmin/'
+
+  # =================================================
+  # Backend
+  # Same backend for Admin and Master Admin
+  # =================================================
+  _API_BASE_URL: 'https://uat-support-admin.indiabullssecurities.com/ib-faq-handler-admin'
+
+  # =================================================
+  # Google Workspace SSO
+  # Must match GOOGLE_CLIENT_ID in gcp/.env-gcp-uat.yaml: the function checks
+  # claims.aud against it, so a mismatch fails every sign-in with wrong_audience.
+  # Both admin hostnames must be Authorized JavaScript origins on this client.
+  # =================================================
+  _GOOGLE_CLIENT_ID: '620876318042-3768hqa8n87ip4uve69r70t4lt751l0l.apps.googleusercontent.com'
+
+# =================================================
+# Cloud Build Logs
+# =================================================
+
+logsBucket: 'gs://ib-product-application-uat-cloud-build-logs'
+
+options:
+  logging: GCS_ONLY
+
+timeout: '1200s'
