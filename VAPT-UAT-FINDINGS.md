@@ -17,15 +17,20 @@ exhausting the 20/min budget, so the limiter itself is unverified in production.
 
 | # | Finding | Severity | State |
 | --- | --- | --- | --- |
-| 1 | SSO non-functional — stale frontend build deployed | **High** (availability) | Fix committed, needs deploy |
-| 2 | No security headers on the frontend at all | **High** | Needs LB/bucket change |
-| 3 | Admin HTML publicly cacheable for 1 hour | **Medium** | Fixed in `cloud-build-uat.yaml` |
-| 4 | GCS bucket anonymously listable | **Medium** | Needs IAM change |
-| 5 | Both hostnames serve both panels | **Low** | Design decision |
-| 6 | No HSTS; plain HTTP returns empty reply | **Low** | Needs LB change |
+| 1 | SSO non-functional — stale frontend build deployed | **High** (availability) | **Closed** — deployed, verified live |
+| 2 | No security headers on the frontend at all | **High** | **Open** — needs LB/bucket change |
+| 3 | Admin HTML publicly cacheable for 1 hour | **Medium** | Fixed in repo, **awaiting deploy** |
+| 4 | GCS bucket anonymously listable | **Medium** | **Open** — needs IAM change |
+| 5 | Both hostnames serve both panels | **Low** | Mitigated in app, **awaiting deploy** |
+| 6 | No HSTS; plain HTTP returns empty reply | **Low** | **Open** — needs LB change |
+| 7 | Bare admin hostname served a panel chooser | **Low** | Fixed in repo, **awaiting deploy** |
 | — | API authentication and CORS | **Pass** | — |
 | — | TLS configuration | **Pass** | — |
 | — | Secret/source exposure | **Pass** | — |
+
+Findings 2, 4 and 6 are infrastructure settings with no representation in this
+repository. They cannot be closed by a commit and are listed with the exact
+commands that close them.
 
 ---
 
@@ -57,6 +62,11 @@ is unset, so the audience is configured and the endpoint is live.
 ```bash
 gcloud builds submit --config=gcp-deploy/cloud-build-uat.yaml .
 ```
+
+**Closed.** A deploy landed at 12:32 GMT on 2026-09-08 and the live bundle now
+carries the client id and calls `/auth/google`; no `/auth/sso` remains. Re-test
+with `Cache-Control: no-cache` — finding 3 means an edge can serve an hour-old
+copy, which is what made this look unfixed on the first pass.
 
 ## 2. No security headers on the frontend (High)
 
@@ -153,9 +163,25 @@ the site root. The master admin panel is therefore reachable at
 
 This is not an authorisation bypass — the function checks the master role on
 every privileged call regardless of origin — but it means the two domains are
-presentational rather than a real boundary. If the intent is genuine separation,
-serve each panel from its own bucket, or have the load balancer reject the
-foreign path per host.
+presentational rather than a real boundary.
+
+**Mitigated in the app, not closed.** `components/PanelHostGuard.tsx` now sends
+a panel opened on the wrong host to the host that owns it, keeping the
+environment (UAT redirects to UAT). It does nothing on hosts that serve both
+panels, so localhost and preview channels are unaffected. Unit-checked across
+nine host/panel combinations including redirect-loop safety.
+
+A client-side redirect is not a security control: the bytes are still served
+before it runs, and it can be disabled. **Closing this properly means the
+hosting layer never serving the foreign path** — either a bucket per panel, or
+per-host path rules on the load balancer:
+
+```bash
+# sketch — reject the foreign path per host on the URL map
+gcloud compute url-maps describe <URL_MAP> --format=yaml > urlmap.yaml
+# add a pathMatcher per host so uat-support-admin.* has no /masteradmin/ route
+gcloud compute url-maps import <URL_MAP> --source=urlmap.yaml
+```
 
 ## 6. No HSTS; plain HTTP returns an empty reply (Low)
 
@@ -165,6 +191,22 @@ never served, which is the important part, but a user typing `http://` gets a
 broken connection rather than an upgrade, and without HSTS the first request is
 unprotected. The HSTS header in finding 2 addresses the second half; a 301 on
 port 80 addresses the first.
+
+## 7. Bare admin hostname served a panel chooser (Low)
+
+Opening `https://uat-support-admin.indiabullssecurities.com/` returned an index
+page listing both panels instead of the manager portal, and the same page came
+up on the master admin host. Each host advertised the other's panel, and neither
+bare hostname reached anything.
+
+`app/page.tsx` claimed in its own comment that each host rewrites its root to a
+single panel "see firebase.json". No such rewrite exists — both hosting blocks
+have no `rewrites` key — and the live deploy would not consult firebase.json in
+any case, for the same reason as findings 2 and 3.
+
+**Fixed in repo, awaiting deploy.** Root routing is restored in `app/page.tsx`,
+client-side via `lib/host.ts`, so it works on both the bucket and Firebase
+paths. The two links remain as the fallback for hosts that serve both panels.
 
 ---
 
@@ -198,11 +240,16 @@ appears nowhere in the tree or its history.
 
 ## Order of work
 
-1. Deploy current `main` — resolves finding 1 and applies finding 3's fix.
-2. Set the backend-bucket response headers — finding 2.
-3. Correct the bucket IAM — finding 4.
-4. Re-run the checks below.
-5. Decide on findings 5 and 6.
+Finding 1 is closed. What remains:
+
+1. **Deploy current `main`** — applies the repo-side fixes for findings 3, 5 and 7.
+2. **Backend-bucket response headers** — finding 2, the highest open item.
+3. **Bucket IAM** — finding 4.
+4. **Re-run the checks below.**
+5. Decide on finding 6 (a 301 on port 80) and whether finding 5 warrants closing
+   at the hosting layer rather than in the app.
+
+Steps 2 and 3 need `gcloud`; nothing in the repository can substitute for them.
 
 ## Re-test commands
 
@@ -226,4 +273,17 @@ curl -sI $H/admin/ | grep -i cache-control        # expect no-store
 # 5. bucket no longer listable
 curl -s -o /dev/null -w '%{http_code}\n' \
   https://storage.googleapis.com/ib-product-application-admin-uat   # expect 403
+
+# 6. bare hostname routes to its own panel (finding 7)
+curl -s -H 'Cache-Control: no-cache' $H/ | grep -c 'Internal panels'   # expect 0
+
+# 7. host guard shipped (finding 5)
+curl -s $H/masteradmin/ | grep -oE '/_next/static/[^"]+\.js' | sort -u | while read -r p; do
+  curl -s "$H$p"; done | grep -c 'support-masteradmin'    # expect >0
 ```
+
+Checks 1, 2, 6 and 7 all read the built bundle, so run them with
+`Cache-Control: no-cache` until finding 3's fix is deployed — otherwise an edge
+may answer with an hour-old copy and the result will be misleading. That is
+exactly what happened during this assessment: finding 1 first appeared unfixed
+because the cached bundle predated the deploy.

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { panelForHost } from '@/lib/host';
 
 /* Index for the admin app.
  *
@@ -23,16 +24,6 @@ import Link from 'next/link';
  * The page carries no data and no authentication state — both panels do their
  * own login, so there is nothing here worth protecting and nothing to leak.
  */
-
-function panelForHost(hostname: string): string | null {
-  const h = hostname.toLowerCase();
-  // Match the deployed hostnames specifically. A looser test such as
-  // h.includes('admin') would also catch ib-admin-uat.web.app and the bucket
-  // URL, which should fall through to the two links instead.
-  if (h.includes('support-masteradmin')) return '/masteradmin/';
-  if (h.includes('support-admin')) return '/admin/';
-  return null;
-}
 
 export default function Home() {
   const [target, setTarget] = useState<string | null>(null);

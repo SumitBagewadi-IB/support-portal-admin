@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import PanelHostGuard from '@/components/PanelHostGuard'
 
 export const metadata: Metadata = {
   title: 'Master Admin | Indiabulls Securities Support',
@@ -7,5 +8,10 @@ export const metadata: Metadata = {
 }
 
 export default function MasterAdminLayout({ children }: { children: React.ReactNode }) {
-  return <>{children}</>
+  return (
+    <>
+      <PanelHostGuard panel="/masteradmin/" />
+      {children}
+    </>
+  )
 }
