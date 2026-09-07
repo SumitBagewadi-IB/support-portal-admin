@@ -30,61 +30,66 @@ A mismatch fails every sign-in with `wrong_audience`.
 
 ---
 
-## Step 1 — Create the OAuth client (Console only)
+## Step 1 — The OAuth client (already exists — verify, do not recreate)
 
-**`gcloud` cannot do this.** There is no command that creates a general-purpose
-OAuth 2.0 Web client or sets its JavaScript origins. `gcloud alpha iap
-oauth-clients` creates IAP-brand clients only, which is a different thing and
-does not accept the origins this flow requires. This one step is manual.
-
-```
-Console -> APIs & Services -> Credentials
-  -> Create credentials -> OAuth client ID
-  -> Application type: Web application
-  -> Name: IB Support Admin Portal (UAT)
-```
-
-**Authorized JavaScript origins** — both are required. The admin and master
-admin sites are separate origins and Google refuses to render the button on an
-origin that is not listed:
+The client is provisioned and its origins are correct. **Do not create a new
+one**; a second client would issue tokens with a different `aud` and every
+sign-in would fail until both files below were updated to match it.
 
 ```
-https://uat-support-admin.indiabullssecurities.com
-https://uat-support-masteradmin.indiabullssecurities.com
+Client ID : 620876318042-3768hqa8n87ip4uve69r70t4lt751l0l.apps.googleusercontent.com
+Project   : ibproduct-vibe-coding
+Console   : APIs & Services -> Credentials -> Clients -> "Web client 1"
 ```
 
-**Authorized redirect URIs** — leave empty. This flow returns an ID token
-straight to the page; there is no redirect leg.
+All four admin origins are registered, so Google will render the button on each:
 
-The client secret Google generates for a Web client is **not used** by this
-codebase and does not need to go anywhere.
+| Authorized JavaScript origin | |
+| --- | --- |
+| `https://uat-support-admin.indiabullssecurities.com` | UAT admin |
+| `https://uat-support-masteradmin.indiabullssecurities.com` | UAT master admin |
+| `https://support-admin.indiabullssecurities.com` | prod admin |
+| `https://support-masteradmin.indiabullssecurities.com` | prod master admin |
 
-On the OAuth consent screen, set User type to **Internal** so only
-`indiabulls.com` accounts can complete sign-in.
+Authorized redirect URIs are empty, which is correct — this flow returns an ID
+token straight to the page and has no redirect leg. The client secret Google
+generated is **not used** by this codebase and must not be committed anywhere.
 
-### Then wire the id into the repo
-
-Copy the client id and set it in **both** places:
+Confirm the id still agrees across the three places it appears:
 
 ```bash
-CLIENT_ID='<paste-the-new-client-id>.apps.googleusercontent.com'
-
-# build-time (frontend bundle)
-sed -i "s|_GOOGLE_CLIENT_ID: '.*'|_GOOGLE_CLIENT_ID: '${CLIENT_ID}'|" \
-  gcp-deploy/cloud-build-uat.yaml
-
-# runtime (function audience check)
-sed -i "s|^GOOGLE_CLIENT_ID: .*|GOOGLE_CLIENT_ID: \"${CLIENT_ID}\"|" \
-  gcp/.env-gcp-uat.yaml
-
-grep -n "GOOGLE_CLIENT_ID" gcp-deploy/cloud-build-uat.yaml gcp/.env-gcp-uat.yaml
+CONSOLE='620876318042-3768hqa8n87ip4uve69r70t4lt751l0l.apps.googleusercontent.com'
+BUILD=$(grep -oE "[0-9]+-[A-Za-z0-9._-]+\.apps\.googleusercontent\.com" gcp-deploy/cloud-build-uat.yaml | head -1)
+RUNTIME=$(grep -oE "[0-9]+-[A-Za-z0-9._-]+\.apps\.googleusercontent\.com" gcp/.env-gcp-uat.yaml | head -1)
+[ "$CONSOLE" = "$BUILD" ] && [ "$CONSOLE" = "$RUNTIME" ] && echo "aligned" || echo "MISMATCH"
 ```
 
-> The value currently committed (`620876318042-…`) belongs to project
-> `ibproduct-vibe-coding`, not `ib-product-application-uat`. It works, but it
-> puts the portal's auth trust anchor in a different project. Creating the
-> client in `ib-product-application-uat` and replacing the value is the
-> cleaner arrangement.
+### Check the consent screen before testing
+
+Origins being right is necessary but not sufficient. Under **Google Auth
+Platform -> Audience**, check the user type and publishing status:
+
+- **Internal** — only accounts in the owning Workspace org can sign in. Correct
+  if this project sits under the `indiabulls.com` org.
+- **External + Testing** — *only accounts listed as test users can sign in.*
+  Everyone else is refused by Google before the request ever reaches the
+  function, so nothing appears in the function logs. If sign-in fails for
+  colleagues but works for you, this is almost always why: either add them as
+  test users or publish the app.
+- **External + In production** — any Google account may attempt. The function
+  still rejects anything outside `OTP_ALLOWED_DOMAIN` (`indiabulls.com`), so
+  access stays closed, but the consent screen itself is public.
+
+### One thing worth changing later
+
+This client lives in `ibproduct-vibe-coding`, while the backend deploys to
+`ib-product-application-uat`. It works — an OAuth client is not scoped to the
+project its callers run in — but it puts the portal's auth trust anchor in a
+project separate from the workload. Moving it means creating a client in
+`ib-product-application-uat` with the same four origins, then updating the two
+files above together. Do it as a deliberate change with a redeploy, not
+piecemeal: the moment the two values disagree, every sign-in fails with
+`wrong_audience`.
 
 ---
 
@@ -229,11 +234,13 @@ gcloud functions logs read "$FUNCTION_NAME" --gen2 --region="$REGION" --limit=50
 | `token_invalid` | token rejected by `tokeninfo` |
 | HTTP 503 | `GOOGLE_CLIENT_ID` is unset on the function |
 
-## Two things this repo cannot control
+## Outside this repo's control
 
-**Authorized JavaScript origins** live on the OAuth client (Step 1). Both admin
-hostnames must be listed or the button will not render, no matter what the code
-does.
+**Authorized JavaScript origins** — done. All four admin hostnames are on the
+client (Step 1). Re-check this first if the button ever stops rendering.
+
+**Consent screen audience** — see Step 1. External + Testing silently refuses
+anyone who is not a listed test user, and leaves no trace in the function logs.
 
 **CSP headers on the Cloud Build path.** `firebase.json` sets
 `connect-src` to allow the cross-origin call the master admin host makes to the
